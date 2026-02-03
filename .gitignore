@@ -24,6 +24,10 @@ profile.cov
 go.work
 go.work.sum
 
+# Certs
+*.crt
+*.key
+
 # env file
 .env
 
