@@ -5,20 +5,47 @@ services:
     container_name: traefik
     restart: unless-stopped
     command:
-      # This will make the dashboard reachable on port 8080.
-      - "--api.insecure=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
 
       - "--providers.docker=true"
-      - "--entrypoints.web.address=:80"
+      - "--providers.file.filename=/dynamic/tls.yaml"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=proxy"
+
+      - "--log.level=INFO"
+      - "--accesslog=true"
+
     ports:
       - "80:80"
-      - "8080:8080"
+      - "443:443"
+
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./configs/traefik/certs:/certs:ro
+      - ./configs/traefik/dynamic:/dynamic:ro
+
+    networks:
+      - proxy
 
   whoami:
     image: traefik/whoami
     container_name: whoami
     restart: unless-stopped
+
     labels:
-      - "traefik.http.routers.whoami.rule=Host(`whoami.localhost`)"
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami.rule=Host(`iam-kc.demo`) && PathPrefix(`/whoami`)"
+      - "traefik.http.routers.whoami.entrypoints=websecure"
+      - "traefik.http.routers.whoami.tls=true"
+
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    name: proxy
