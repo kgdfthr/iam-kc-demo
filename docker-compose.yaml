@@ -11,24 +11,26 @@ services:
       - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.websecure.http.tls=true"
-
       - "--providers.docker=true"
       - "--providers.file.filename=/dynamic/tls.yaml"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=proxy"
-
       - "--log.level=INFO"
       - "--accesslog=true"
-
+      - "--api.dashboard=true"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.iam-kc.demo`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      # - "traefik.http.routers.dashboard.middlewares=basic-auth@file"
     ports:
       - "80:80"
       - "443:443"
-
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./configs/traefik/certs:/certs:ro
       - ./configs/traefik/dynamic:/dynamic:ro
-
     networks:
       - proxy
 
@@ -36,16 +38,94 @@ services:
     image: traefik/whoami
     container_name: whoami
     restart: unless-stopped
-
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.whoami.rule=Host(`iam-kc.demo`) && PathPrefix(`/whoami`)"
       - "traefik.http.routers.whoami.entrypoints=websecure"
       - "traefik.http.routers.whoami.tls=true"
-
+      - "traefik.http.routers.whoami.middlewares=oauth2-proxy@docker"
     networks:
       - proxy
+
+  postgres:
+    image: postgres:18.1-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${KC_DB_NAME}
+      POSTGRES_USER: ${KC_DB_USER}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - keycloak
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.5.0
+    container_name: keycloak
+    restart: unless-stopped
+    command:
+      - start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KC_DB_NAME}
+      KC_DB_USERNAME: ${KC_DB_USER}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KC_HOSTNAME: ${KC_HOSTNAME}
+      KC_HOSTNAME_STRICT: "true"
+      KC_PROXY: edge
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: true
+      KEYCLOAK_ADMIN: ${KC_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      KC_LOG_LEVEL: INFO
+      KC_LOG_CONSOLE_OUTPUT: json
+    networks:
+      - keycloak
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`${KC_HOSTNAME}`)"
+      - "traefik.http.routers.keycloak.entrypoints=websecure"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+      # - "traefik.http.routers.keycloak.middlewares=security-headers@file"
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.1
+    container_name: oauth2-proxy
+    restart: unless-stopped
+    command:
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true
+      - --config=/etc/oauth2-proxy/oauth2-proxy.cfg
+    environment:
+      SSL_CERT_FILE: /etc/ssl/certs/my-ca.crt
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_COOKIE_SECRET}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.oauth2-proxy.forwardauth.address=http://oauth2-proxy:4180/"
+      - "traefik.http.middlewares.oauth2-proxy.forwardauth.trustForwardHeader=true"
+      - "traefik.http.middlewares.oauth2-proxy.forwardauth.authResponseHeaders=X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Access-Token,Authorization"
+      # OAuth2 proxy routes
+      - "traefik.http.routers.oauth2-proxy.rule=Host(`${DOMAIN}`) && PathPrefix(`/oauth2`)"
+      - "traefik.http.routers.oauth2-proxy.entrypoints=websecure"
+      - "traefik.http.services.oauth2-proxy.loadbalancer.server.port=4180"
+    networks:
+      - proxy
+      - keycloak
+    volumes:
+      - ./configs/oauth2-proxy/oauth2-proxy.cfg:/etc/oauth2-proxy/oauth2-proxy.cfg:ro
+      - ./configs/traefik/certs/ca.crt:/etc/ssl/certs/my-ca.crt:ro
+    extra_hosts:
+      - "keycloak.iam-kc.demo:host-gateway"
 
 networks:
   proxy:
     name: proxy
+  keycloak:
+    name: keycloak
+
+volumes:
+  postgres-data:
